@@ -1,0 +1,37 @@
+name: Build Windows exe
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install customtkinter pyinstaller
+
+      - name: Build exe
+        run: pyinstaller --noconfirm --onefile --windowed --name "CBC-BallisticCalculator" --collect-data customtkinter gui.py
+
+      - name: Keep the exe as a downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CBC-BallisticCalculator
+          path: dist/CBC-BallisticCalculator.exe
+
+      - name: Attach the exe to the release
+        if: github.event_name == 'release'
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/CBC-BallisticCalculator.exe --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
