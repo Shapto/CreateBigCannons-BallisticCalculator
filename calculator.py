@@ -1,292 +1,162 @@
+from math import sin, cos, atan, sqrt, radians, log
 
-from math import sin, cos, atan, sqrt, pi, radians, log
+# Physics model matches Create Big Cannons 5.11.7 (mc 1.21.1):
+#   AbstractCannonProjectile.tick():
+#       acceleration = -drag * velocity + (0, gravity, 0)
+#       position    += velocity + 0.5 * acceleration
+#       velocity    += acceleration
+#   Muzzle velocity = total charge power (powder charge = 2 per block, big cartridge = 2 per power level)
+#   Projectile spawns at the centre of the last barrel block (the muzzle).
+#
+# Original brute-force idea and formulas: @sashafiesta on Discord, calculator by Malex21.
+
+DEFAULT_GRAVITY = -0.05
+DEFAULT_DRAG = 0.01
+POWER_PER_CHARGE = 2.0
+
+MINIMUM_PITCH = -30.0
+MAXIMUM_PITCH = 60.0
+SCAN_STEP_DEGREES = 0.25
+
+# Values from data/minecraft/dimension_munition_properties in the CBC jar
+DIMENSION_MULTIPLIERS = {
+    "overworld": (1.0, 1.0),   # (gravity multiplier, drag multiplier)
+    "nether": (1.1, 1.1),
+    "end": (0.8, 0.0),
+}
+
+# Per-projectile gravity / drag / added charge power from munition_properties/projectiles
+PROJECTILE_PROPERTIES = {
+    "default": (-0.05, 0.01, 0.0),       # shot, HE, AP, shrapnel, smoke, fluid shells
+    "mortar_stone": (-0.025, 0.01, 0.0),
+}
+
 
 class OutOfRangeException(Exception):
     pass
 
 
-def myLinspace(start, end, num):
-    answer = [start]
-    delta = (end - start) / num
-    for _ in range(num - 1):
-        answer.append(answer[-1] + delta)
-    answer.append(end)
-    return answer
-
-def timeInAir(y0, y, Vy):
-    """Find the air time of the projectile, using recursive sequence.
-    It gives time in air by comparing the y-coordinate of the shell to the targets.
-    The shell will hit target only when its y-coord is the same as the targets,
-    so by comparing those we can find for how long the shell is airborn
-
-    Args:
-        y0 (float): y coordinate of the projectile
-        y (float): y coordinate of the target
-        Vy (float): vertical velocity of the projectile
-
-    Returns:
-        (int, int): Airtime of projectile in ticks / -1 if can't hit from (below / above)
+class BallisticModel:
     """
-    t = 0
-    t_below = 999_999_999
+    Closed-form version of CBC's per-tick projectile update.
+    Works with fractional tick counts so the solver can root-find smoothly.
+    """
 
-    if y0 <= y:
-        # If cannon is lower than a target, simulating the way, up to the targets level
+    def __init__(self, gravity, drag):
+        self.gravity = gravity
+        self.drag = drag
+        self.positionFactor = 1.0 - drag / 2.0
+        self.velocityRetention = 1.0 - drag
 
-        while t < 100000:
+    def velocitySum(self, ticks):
+        """Sum of retention^k for k = 0 .. ticks-1."""
+        if self.drag == 0:
+            return ticks
+        return (1.0 - self.velocityRetention ** ticks) / self.drag
 
-            y0 += Vy
-            Vy = 0.99 * Vy - 0.05
+    def horizontalDistance(self, horizontalSpeed, ticks):
+        return self.positionFactor * horizontalSpeed * self.velocitySum(ticks)
 
-            t += 1
+    def verticalDistance(self, verticalSpeed, ticks):
+        if self.drag == 0:
+            return verticalSpeed * ticks + self.gravity * ticks * ticks / 2.0
+        velocitySum = self.velocitySum(ticks)
+        gravityPart = (self.gravity / self.drag) * (ticks - velocitySum)
+        return self.positionFactor * (verticalSpeed * velocitySum + gravityPart) + self.gravity * ticks / 2.0
 
-            if y0 > y:  # Will break when the projectile gets higher than target
-                t_below = t-1
-                break
+    def ticksToCover(self, horizontalSpeed, horizontalDistance):
+        """Inverse of horizontalDistance. Returns None if drag stops the shell before it gets there."""
+        if horizontalSpeed <= 0:
+            return None
+        if self.drag == 0:
+            return horizontalDistance / (self.positionFactor * horizontalSpeed)
+        remainingFraction = 1.0 - horizontalDistance * self.drag / (self.positionFactor * horizontalSpeed)
+        if remainingFraction <= 0:
+            return None
+        return log(remainingFraction) / log(self.velocityRetention)
 
-            # If the projectile stopped ascending before going above target then it will never hit it, so return early
-            if Vy < 0:
-                return -1, -1
 
-    while t < 100000:
+def simulateClosestApproach(model, muzzleSpeed, pitchDegrees, muzzleOffset, horizontalDistance, heightDifference, maximumTicks=2000):
+    """
+    Tick-by-tick simulation exactly like the mod, used to measure how close the shell actually gets.
+    Returns the smallest distance (in blocks) between the shell's path and the target.
+    """
+    pitchRadians = radians(pitchDegrees)
+    horizontalPosition = muzzleOffset * cos(pitchRadians)
+    verticalPosition = muzzleOffset * sin(pitchRadians)
+    horizontalVelocity = muzzleSpeed * cos(pitchRadians)
+    verticalVelocity = muzzleSpeed * sin(pitchRadians)
 
-        y0 += Vy
-        Vy = 0.99 * Vy - 0.05
+    closestDistance = float("inf")
+    for _ in range(maximumTicks):
+        horizontalAcceleration = -model.drag * horizontalVelocity
+        verticalAcceleration = -model.drag * verticalVelocity + model.gravity
 
-        t += 1
+        nextHorizontal = horizontalPosition + horizontalVelocity + 0.5 * horizontalAcceleration
+        nextVertical = verticalPosition + verticalVelocity + 0.5 * verticalAcceleration
 
-        # Returns only when projectile is at same level than target or lower
-        if y0 <= y:
-            return t_below, t
-    return -1, -1
+        # Closest point on this tick's straight segment (CBC clips along the segment too)
+        segmentHorizontal = nextHorizontal - horizontalPosition
+        segmentVertical = nextVertical - verticalPosition
+        segmentLengthSquared = segmentHorizontal ** 2 + segmentVertical ** 2
+        if segmentLengthSquared > 0:
+            segmentFraction = ((horizontalDistance - horizontalPosition) * segmentHorizontal + (heightDifference - verticalPosition) * segmentVertical) / segmentLengthSquared
+            segmentFraction = max(0.0, min(1.0, segmentFraction))
+            closestHorizontal = horizontalPosition + segmentHorizontal * segmentFraction
+            closestVertical = verticalPosition + segmentVertical * segmentFraction
+            closestDistance = min(closestDistance, sqrt((closestHorizontal - horizontalDistance) ** 2 + (closestVertical - heightDifference) ** 2))
 
-def getFirstElement(array):
-    return array[0]
+        horizontalPosition, verticalPosition = nextHorizontal, nextVertical
+        horizontalVelocity += horizontalAcceleration
+        verticalVelocity += verticalAcceleration
 
-def getRoot(tab, sens):
-    if sens == 1:
-        for i in range(1, len(tab)):
-            if tab[i - 1][0] < tab[i][0]:
-                return tab[i - 1]
-        return tab[-1]
-    elif sens == -1:
-        for i in reversed(range(0, len(tab) - 1)):
-            if tab[i][0] > tab[i + 1][0]:
-                return tab[i + 1]
-        return tab[0]
-    else:
-        raise ValueError("sens must be 1 or -1")
+        if verticalPosition < heightDifference - 64 and verticalVelocity < 0:
+            break
+        if horizontalPosition > horizontalDistance + 64:
+            break
+    return closestDistance
 
-def BallisticsToTarget(cannon, target, power, direction, lenght):
-    """Function that calculates the elevation angle to hit the target with a cannon
+
+def BallisticsToTarget(cannon, target, power, direction, lenght, dimension="overworld", projectile="default"):
+    """Calculates yaw and the two pitch solutions (shallow and steep) to hit a target.
 
     Args:
         cannon (tuple): Position of the cannon block held by the mount (x, y, z)
-        target (tuple): Position of the target (x, y, z)
-        power (int): Power of the cannon / Number of powder charges
-        direction (str): Direction of the cannon (East, West...)
-        lenght (int): Lenght of the cannon from mount to tip
+        target (tuple): Position of the target block (x, y, z)
+        power (int): Number of powder charges (big cartridge: total power levels)
+        direction (str): Direction the cannon faces when not mounted (north/south/east/west)
+        lenght (int): Blocks from the mount-held block to the muzzle, both included
+        dimension (str): overworld / nether / end
+        projectile (str): key of PROJECTILE_PROPERTIES
 
     Returns:
-        tuple: The yaw, pitch required and predicted airtime of the projectile (yaw, pitch, airtime, fuzeTime)
+        tuple of two tuples: (yaw, pitch, airtimeTicks, airtimeSeconds, fuzeTime, precision)
     """
 
-    """
-    R1 (int): Rotation speed of the yaw shaft
-    R2 (int): Rotation speed of the pitch shaft
-    """
+    projectileGravity, projectileDrag, addedChargePower = PROJECTILE_PROPERTIES.get(projectile, PROJECTILE_PROPERTIES["default"])
+    gravityMultiplier, dragMultiplier = DIMENSION_MULTIPLIERS.get(dimension, DIMENSION_MULTIPLIERS["overworld"])
+    model = BallisticModel(projectileGravity * gravityMultiplier, projectileDrag * dragMultiplier)
 
-    Dx, Dz = (cannon[0] - target[0], cannon[2] - target[2])
-    distance = sqrt(Dx * Dx + Dz * Dz)
-    # Horizontal distance between target and mount
+    muzzleSpeed = power * POWER_PER_CHARGE + addedChargePower
+    if muzzleSpeed <= 0:
+        raise OutOfRangeException("You need at least one charge !")
 
-    initialSpeed = power * 2
+    # Projectile spawns at the centre of the muzzle block, which is (lenght - 1) blocks from the mount-held block's centre
+    muzzleOffset = max(lenght - 1, 0)
 
-    nbOfIterations = 5  # by default
+    deltaX, deltaZ = (cannon[0] - target[0], cannon[2] - target[2])
+    horizontalDistance = sqrt(deltaX * deltaX + deltaZ * deltaZ)
+    heightDifference = target[1] - cannon[1]
 
-    if Dx != 0:
-        yaw = atan(Dz / Dx) * 57.2957795131  # 180/pi
+    # --- Yaw (unchanged from the original calculator) ---
+    if deltaX != 0:
+        yaw = atan(deltaZ / deltaX) * 57.2957795131
     else:
         yaw = 90
-
-    if Dx >= 0:
+    if deltaX >= 0:
         yaw += 180
 
-    pitch: float
-    # Let's bruteforce pitch !
-
-    def tryAllAngles(low, high, nbOfElements):
-        """Bruteforce every angle between low and high, and returns the one that corresponds the most to the timeToTarget
-        
-        Args:
-            low (float): Lower bound of the angle
-            high (float): Upper bound of the angle
-            nbOfElements (int): Number of elements to bruteforce
-        
-        Raises:
-            OutOfRangeException: If the target is unreachable with the current cannon configuration
-        
-        Returns:
-            tuple: The pitch and the airtime of the shell
-        """
-
-
-        deltaTimes = []
-        for triedPitch in myLinspace(low, high, nbOfElements):
-            # Bias that the cannon is probably gonna aim up instead of down
-            # No use for now, useful for a later optimisation
-
-            triedPitchRad = radians(triedPitch)  # cuz triedPitch is in degrees
-
-            Vw = cos(triedPitchRad) * initialSpeed
-            Vy = sin(triedPitchRad) * initialSpeed
-
-            xCoord_2d = lenght * cos(triedPitchRad)
-            # This value is the horizontal distance between the mount and the tip
-            # of the cannon, on the ballistic plane. By substracting this value from
-            # the distance between the mount and the target, we get the horizontal distance
-            # between the end of the barrel and the target which is what we want
-
-            try:
-                timeToTarget = abs(
-                    log(1 - (distance - xCoord_2d) / (100 * Vw)) / (-0.010050335853501)
-                )
-            except ValueError:
-                continue
-            # This is the air resistance formula, here the denominator is ln(0.99)
-
-            yCoordOfEndBarrel = cannon[1] + sin(triedPitchRad) * lenght
-
-            t_below, t_above = timeInAir(yCoordOfEndBarrel, target[1], Vy)
-            if t_below < 0: continue
-
-            # if target is above cannon it may hit on ascension
-            # if target is possible to hit and it doesn't hit on ascension then "timeToTarget - t_below" will
-            # be basically timeToTarget + 1 so it will always just calculate "timeToTarget - t_above"
-            deltaT = min(
-                abs(timeToTarget - t_below),
-                abs(timeToTarget - t_above)
-            )
-
-            # We calculate the difference between the time to target and airtime of the shell
-            # The way this whole thing works is by comparing those values
-            # We try to find the angle that corresponds the most to the timeToTarget
-
-            """
-            TimeToTarget is the time it takes for the shell to reach the target on the horizontal plane
-            timeAir is the time it takes for the shell to reach the target depending on the given angle
-            We try to find the airTime that corresponds the most to TimeToTarget, by taking the difference of TimeToTarget
-            by every airTime possible (Bruteforcing every angle between -30 and 60 degrees)
-            """
-
-            deltaTimes.append((deltaT, triedPitch, deltaT + timeToTarget))
-
-        if len(deltaTimes) == 0:
-            raise OutOfRangeException("The target is unreachable with your current canon configuration !")
-
-        deltaTime1, pitch1, timeAir1 = getRoot(deltaTimes, 1)
-        deltaTime2, pitch2, timeAir2 = getRoot(deltaTimes, -1)
-
-        return (deltaTime1, pitch1, timeAir1), (deltaTime2, pitch2, timeAir2)
-        # Gives the minimum value depending on deltaT, the difference between airtime and TimeToTarget
-
-        # We do the same thing, but near pitch, to get a more precise angle
-
-    def tryAllAnglesUnique(low, high, nbOfElements):
-        """Bruteforce every angle between low and high, and returns the one that corresponds the most to the timeToTarget
-
-        Args:
-            low (float): Lower bound of the angle
-            high (float): Upper bound of the angle
-            nbOfElements (int): Number of elements to bruteforce
-        
-        Raises:
-            OutOfRangeException: If the target is unreachable with the current cannon configuration
-        
-        Returns:
-            tuple: The pitch and the airtime of the shell
-        """
-
-        deltaTimes = []
-        for triedPitch in myLinspace(low, high, nbOfElements):
-            # Bias that the cannon is probably gonna aim up instead of down
-            # No use for now, useful for a later optimisation
-
-            triedPitchRad = radians(triedPitch)  # cuz triedPitch is in degrees
-
-            Vw = cos(triedPitchRad) * initialSpeed
-            Vy = sin(triedPitchRad) * initialSpeed
-
-            xCoord_2d = lenght * cos(triedPitchRad)
-            # This value is the horizontal distance between the mount and the tip
-            # of the cannon, on the ballistic plane. By substracting this value from
-            # the distance between the mount and the target, we get the horizontal distance
-            # between the end of the barrel and the target which is what we want
-
-            try:
-                timeToTarget = abs(
-                    log(1 - (distance - xCoord_2d) / (100 * Vw)) / (-0.010050335853501)
-                )
-            except ValueError:
-                continue
-            # This is the air resistance formula, here the denominator is ln(0.99)
-
-            yCoordOfEndBarrel = cannon[1] + sin(triedPitchRad) * lenght
-
-            t_below, t_above = timeInAir(yCoordOfEndBarrel, target[1], Vy)
-            if t_below < 0: continue
-
-            # if target is above cannon it may hit on ascension
-            # if target is possible to hit and it doesn't hit on ascension then "timeToTarget - t_below" will
-            # be basically timeToTarget + 1 so it will always just calculate "timeToTarget - t_above"
-            deltaT = min(
-                abs(timeToTarget - t_below),
-                abs(timeToTarget - t_above)
-            )
-            # We calculate the difference between the time to target and airtime of the shell
-            # The way this whole thing works is by comparing those values
-            # We try to find the angle that corresponds the most to the timeToTarget
-
-            """
-            TimeToTarget is the time it takes for the shell to reach the target on the horizontal plane
-            timeAir is the time it takes for the shell to reach the target depending on the given angle
-            We try to find the airTime that corresponds the most to TimeToTarget, by taking the difference of TimeToTarget
-            by every airTime possible (Bruteforcing every angle between -30 and 60 degrees)
-            """
-
-            deltaTimes.append((deltaT, triedPitch, deltaT + timeToTarget))
-
-        if len(deltaTimes) == 0:
-            raise OutOfRangeException("The target is unreachable with your current canon configuration !")
-
-        deltaTime, pitch, timeAir = min(deltaTimes, key=getFirstElement)
-
-        return deltaTime, pitch, timeAir
-        # Gives the minimum value depending on deltaT, the difference between airtime and TimeToTarget
-
-        # We do the same thing, but near pitch, to get a more precise angle
-
-
-    (deltaTime1, pitch1, airtime1), (deltaTime2, pitch2, airtime2) = tryAllAngles(-30, 60, 91)
-    
-    for i in range(0, nbOfIterations):
-        (deltaTime1, pitch1, airtime1) = tryAllAnglesUnique(pitch1 - 10**(-i), pitch1 + 10**(-i), 21)
-        (deltaTime2, pitch2, airtime2) = tryAllAnglesUnique(pitch2 - 10**(-i), pitch2 + 10**(-i), 21)
-    
-    if pitch1 > 60.5:
-        pitch1 = "Over 60"
-    elif pitch1 < -29.5:
-        pitch1 = "Under -30"
-    
-    if pitch2 > 60.5:
-        pitch2 = "Over 60"
-    elif pitch2 < -29.5:
-        pitch2 = "Under -30"
-
-    airtimeSeconds1 = airtime1 / 20
-    airtimeSeconds2 = airtime2 / 20
-
-    if direction == "north":  # Arbitrary because minecraft
+    if direction == "north":
         yaw = (yaw + 90) % 360
     elif direction == "west":
         yaw = (yaw + 180) % 360
@@ -295,36 +165,80 @@ def BallisticsToTarget(cannon, target, power, direction, lenght):
     elif direction != "east":
         return "Invalid direction"
 
-    # Now, let's get the times we need to take in order to aim our cannon
-    """
-    yawTime = yaw * 20 / (0.75 * R1)  # in TICKS
-    pitchTime = pitch * 20 / (0.75 * R2)  # in TICKS
-    """
-    fuzeTime1 = int(airtime1 + (deltaTime1 / 2) - 10)
-    fuzeTime2 = int(airtime2 + (deltaTime2 / 2) - 10)
+    # --- Pitch: find angles where the shell passes exactly through the target ---
+    def heightError(pitchDegrees):
+        """Shell height minus target height at the moment it reaches the target horizontally. None if it never gets there."""
+        pitchRadians = radians(pitchDegrees)
+        remainingDistance = horizontalDistance - muzzleOffset * cos(pitchRadians)
+        if remainingDistance < 0:
+            return None
+        ticks = model.ticksToCover(muzzleSpeed * cos(pitchRadians), remainingDistance)
+        if ticks is None:
+            return None
+        shellHeight = muzzleOffset * sin(pitchRadians) + model.verticalDistance(muzzleSpeed * sin(pitchRadians), ticks)
+        return shellHeight - heightDifference
 
-    precision1 = round(1 - deltaTime1 / airtime1, 2) * 100
-    precision2 = round(1 - deltaTime2 / airtime2, 2) * 100
+    def airtimeAt(pitchDegrees):
+        pitchRadians = radians(pitchDegrees)
+        return model.ticksToCover(muzzleSpeed * cos(pitchRadians), horizontalDistance - muzzleOffset * cos(pitchRadians))
 
-    return (
-    (
-        yaw,
-        pitch1,
-        airtime1,
-        round(airtimeSeconds1, 2),
-        fuzeTime1,
-        precision1,
-    ),
-    (
-        yaw,
-        pitch2,
-        airtime2,
-        round(airtimeSeconds2, 2),
-        fuzeTime2,
-        precision2,
-    )
+    scannedPitches = []
+    currentPitch = MINIMUM_PITCH
+    while currentPitch <= 90.0:
+        scannedPitches.append((currentPitch, heightError(currentPitch)))
+        currentPitch += SCAN_STEP_DEGREES
+
+    solutions = []
+    for (lowerPitch, lowerError), (upperPitch, upperError) in zip(scannedPitches, scannedPitches[1:]):
+        if lowerError is None or upperError is None:
+            continue
+        if lowerError == 0:
+            solutions.append(lowerPitch)
+            continue
+        if (lowerError < 0) != (upperError < 0):
+            # Bisection between the two scanned angles
+            for _ in range(60):
+                middlePitch = (lowerPitch + upperPitch) / 2
+                middleError = heightError(middlePitch)
+                if middleError is None:
+                    break
+                if (middleError < 0) == (lowerError < 0):
+                    lowerPitch, lowerError = middlePitch, middleError
+                else:
+                    upperPitch = middlePitch
+            solutions.append((lowerPitch + upperPitch) / 2)
+
+    if not solutions:
+        raise OutOfRangeException("The target is unreachable with your current cannon configuration !")
+
+    shallowPitch = solutions[0]
+    steepPitch = solutions[-1]
+
+    def buildResult(pitchDegrees):
+        airtimeTicks = airtimeAt(pitchDegrees)
+        missDistance = simulateClosestApproach(model, muzzleSpeed, round(pitchDegrees, 2), muzzleOffset, horizontalDistance, heightDifference)
+        precision = round(max(0.0, 1 - missDistance / max(horizontalDistance, 1.0)) * 100, 2)
+
+        # Timed fuze counts down once per projectile tick; same "10 ticks early" offset as the original version
+        fuzeTime = max(1, int(airtimeTicks) - 10)
+
+        if pitchDegrees > MAXIMUM_PITCH + 0.5:
+            shownPitch = "Over 60"
+        elif pitchDegrees < MINIMUM_PITCH - 0.5:
+            shownPitch = "Under -30"
+        else:
+            shownPitch = round(pitchDegrees, 2)
+
+        return (
+            round(yaw, 2) + 0.0,
+            shownPitch,
+            round(airtimeTicks, 1),
+            round(airtimeTicks / 20, 2),
+            fuzeTime,
+            precision,
         )
+
+    return buildResult(shallowPitch), buildResult(steepPitch)
 
 
 # CREDITS OF ORIGINAL FORMULAS : @sashafiesta#1978 on Discord
-

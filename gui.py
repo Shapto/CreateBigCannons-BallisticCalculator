@@ -1,4 +1,17 @@
 from calculator import BallisticsToTarget, OutOfRangeException
+
+# Dropdown text -> calculator keys
+DIMENSION_CHOICES = {
+    "Overworld": "overworld",
+    "Nether": "nether",
+    "End": "end",
+}
+
+PROJECTILE_CHOICES = {
+    "Shell / Shot": "default",
+    "Mortar stone": "mortar_stone",
+}
+
 import customtkinter as ctk
 
 ctk.set_appearance_mode("dark")
@@ -7,6 +20,7 @@ ctk.set_default_color_theme("dark-blue")
 root = ctk.CTk()
 root.title('Create Big Cannons : Ballistic Calculator')
 root.geometry("1600x768")
+
 
 
 def represents_int(s):
@@ -60,7 +74,15 @@ def getAngles():
 
     try:
 
-        angles = BallisticsToTarget(cannonCoords, targetCoords, int(powerEntry.get()), (directionEntry.get()).lower(), int(lenghtEntry.get()))
+        angles = BallisticsToTarget(
+            cannonCoords,
+            targetCoords,
+            int(powerEntry.get()),
+            (directionEntry.get()).lower(),
+            int(lenghtEntry.get()),
+            dimension=DIMENSION_CHOICES[dimensionEntry.get()],
+            projectile=PROJECTILE_CHOICES[projectileEntry.get()],
+        )
 
     except OutOfRangeException as e:
 
@@ -103,7 +125,8 @@ def main():
     powerEntry, directionEntry, button, statusMessage, status,\
     varYaw, varPitch, varAirtime, varAirtimeSeconds, varFuzeTime,\
     varYaw2, varPitch2, varAirtime2, varAirtimeSeconds2, varFuzeTime2,\
-    labelPitch, labelPitch2, varPrecision, varPrecision2
+    labelPitch, labelPitch2, varPrecision, varPrecision2, labelPitch, labelPitch2, varPrecision, varPrecision2,\
+    dimensionEntry, projectileEntry
 
     titre = ctk.CTkLabel(master=root, text="Ballistic Calculator", font=("Roboto", 60), fg_color="#1E538D", corner_radius=20)
 
@@ -148,6 +171,13 @@ def main():
     lenght = ctk.CTkLabel(master=options, text="""Lenght of the cannon 
     (From the block held by the mount to the tip of the cannon, both included)""", font=("Roboto", 16))
     lenghtEntry = ctk.CTkEntry(master=options, validate="key", validatecommand=(isinteger, '%P'))
+    dimension = ctk.CTkLabel(master=options, text="Dimension", font=("Roboto", 16))
+    dimensionEntry = ctk.StringVar(value="Overworld")
+    dimensionComboBox = ctk.CTkComboBox(master=options, values=list(DIMENSION_CHOICES.keys()), variable=dimensionEntry, state="readonly")
+
+    projectileLabel = ctk.CTkLabel(master=options, text="Projectile", font=("Roboto", 16))
+    projectileEntry = ctk.StringVar(value="Shell / Shot")
+    projectileComboBox = ctk.CTkComboBox(master=options, values=list(PROJECTILE_CHOICES.keys()), variable=projectileEntry, state="readonly")
 
     varYaw = ctk.StringVar(value = "Yaw is unknown")
     varPitch = ctk.StringVar(value = "Pitch is unknown")
@@ -221,6 +251,11 @@ def main():
 
     lenght.grid(column=0, row=2, pady=12, padx=10)
     lenghtEntry.grid(column=1, row=2, pady=12, padx=10)
+    dimension.grid(column=0, row=3, pady=12, padx=10)
+    dimensionComboBox.grid(column=1, row=3, pady=12, padx=10)
+
+    projectileLabel.grid(column=0, row=4, pady=12, padx=10)
+    projectileComboBox.grid(column=1, row=4, pady=12, padx=10)
 
     button.grid(column=0, row=5, pady=12, padx=10, columnspan=4)
 
