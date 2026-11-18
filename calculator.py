@@ -116,8 +116,70 @@ def simulateClosestApproach(model, muzzleSpeed, pitchDegrees, muzzleOffset, hori
             break
     return closestDistance
 
+def simulateLandingDistance(model, muzzleSpeed, pitchDegrees, muzzleOffset, heightDifference, maximumTicks=4000):
+    """
+    Tick-by-tick simulation: horizontal distance at which the shell comes back down to heightDifference.
+    Returns None if it never gets there.
+    """
+    pitchRadians = radians(pitchDegrees)
+    horizontalPosition = muzzleOffset * cos(pitchRadians)
+    verticalPosition = muzzleOffset * sin(pitchRadians)
+    horizontalVelocity = muzzleSpeed * cos(pitchRadians)
+    verticalVelocity = muzzleSpeed * sin(pitchRadians)
 
-def BallisticsToTarget(cannon, target, power, direction, lenght, dimension="overworld", projectile="default"):
+    for _ in range(maximumTicks):
+        horizontalAcceleration = -model.drag * horizontalVelocity
+        verticalAcceleration = -model.drag * verticalVelocity + model.gravity
+        nextHorizontal = horizontalPosition + horizontalVelocity + 0.5 * horizontalAcceleration
+        nextVertical = verticalPosition + verticalVelocity + 0.5 * verticalAcceleration
+
+        if verticalVelocity < 0 and nextVertical <= heightDifference <= verticalPosition:
+            crossingFraction = (verticalPosition - heightDifference) / (verticalPosition - nextVertical)
+            return horizontalPosition + (nextHorizontal - horizontalPosition) * crossingFraction
+
+        horizontalPosition, verticalPosition = nextHorizontal, nextVertical
+        horizontalVelocity += horizontalAcceleration
+        verticalVelocity += verticalAcceleration
+    return None
+
+
+def CalibratePowerPerCharge(cannon, landing, power, pitch, lenght, dimension="overworld", projectile="default"):
+    """Works out the real power per charge from one test shot.
+
+    Args:
+        cannon (tuple): Position of the cannon block held by the mount (x, y, z)
+        landing (tuple): Where the test shell actually hit (x, y, z)
+        power (int): Number of charges used for the test shot
+        pitch (float): Pitch the cannon actually had when firing (read it with goggles)
+        lenght (int): Blocks from the mount-held block to the muzzle, both included
+
+    Returns:
+        float: power per charge to type into the calculator (vanilla CBC = 2)
+    """
+    projectileGravity, projectileDrag, addedChargePower = PROJECTILE_PROPERTIES.get(projectile, PROJECTILE_PROPERTIES["default"])
+    gravityMultiplier, dragMultiplier = DIMENSION_MULTIPLIERS.get(dimension, DIMENSION_MULTIPLIERS["overworld"])
+    model = BallisticModel(projectileGravity * gravityMultiplier, projectileDrag * dragMultiplier)
+
+    muzzleOffset = max(lenght - 1, 0)
+    landingDistance = sqrt((landing[0] - cannon[0]) ** 2 + (landing[2] - cannon[2]) ** 2)
+    heightDifference = landing[1] - cannon[1]
+
+    lowestSpeed, highestSpeed = 0.1, 100.0
+    if (simulateLandingDistance(model, highestSpeed, pitch, muzzleOffset, heightDifference) or 0) < landingDistance:
+        raise OutOfRangeException("Couldn't match that test shot - check the landing coordinates and pitch.")
+
+    for _ in range(80):
+        middleSpeed = (lowestSpeed + highestSpeed) / 2
+        reachedDistance = simulateLandingDistance(model, middleSpeed, pitch, muzzleOffset, heightDifference)
+        if reachedDistance is None or reachedDistance < landingDistance:
+            lowestSpeed = middleSpeed
+        else:
+            highestSpeed = middleSpeed
+
+    muzzleSpeed = (lowestSpeed + highestSpeed) / 2
+    return round((muzzleSpeed - addedChargePower) / power, 3)
+
+def BallisticsToTarget(cannon, target, power, direction, lenght, dimension="overworld", projectile="default", powerPerCharge=POWER_PER_CHARGE):
     """Calculates yaw and the two pitch solutions (shallow and steep) to hit a target.
 
     Args:
@@ -137,7 +199,7 @@ def BallisticsToTarget(cannon, target, power, direction, lenght, dimension="over
     gravityMultiplier, dragMultiplier = DIMENSION_MULTIPLIERS.get(dimension, DIMENSION_MULTIPLIERS["overworld"])
     model = BallisticModel(projectileGravity * gravityMultiplier, projectileDrag * dragMultiplier)
 
-    muzzleSpeed = power * POWER_PER_CHARGE + addedChargePower
+    muzzleSpeed = power * powerPerCharge + addedChargePower
     if muzzleSpeed <= 0:
         raise OutOfRangeException("You need at least one charge !")
 

@@ -1,4 +1,4 @@
-from calculator import BallisticsToTarget, OutOfRangeException
+from calculator import BallisticsToTarget, CalibratePowerPerCharge, OutOfRangeException
 
 # Dropdown text -> calculator keys
 DIMENSION_CHOICES = {
@@ -44,6 +44,49 @@ def callback(P):
     else:
         return False
 
+def floatCallback(P):
+    """
+    Callback for decimal entries (power per charge, test pitch)
+    """
+    if P in ("", "-", ".", "-."):
+        return True
+    try:
+        float(P)
+    except ValueError:
+        return False
+    return True
+
+def calibrate():
+    """
+    Uses a test shot to work out the real power per charge and puts it in the power per charge box
+    """
+    try:
+        cannonCoords = tuple(map(int, (xCannon.get(), yCannon.get(), zCannon.get())))
+        landingCoords = tuple(map(int, (xLanding.get(), yLanding.get(), zLanding.get())))
+        testPitch = float(testPitchEntry.get())
+        powerPerCharge = CalibratePowerPerCharge(
+            cannonCoords,
+            landingCoords,
+            int(powerEntry.get()),
+            testPitch,
+            int(lenghtEntry.get()),
+            dimension=DIMENSION_CHOICES[dimensionEntry.get()],
+            projectile=PROJECTILE_CHOICES[projectileEntry.get()],
+        )
+    except ValueError:
+        statusMessage.set("Fill in the mount, charges, length, landing spot and test pitch first !")
+        status.configure(text_color="#980404")
+        return
+    except OutOfRangeException as e:
+        statusMessage.set(e)
+        status.configure(text_color="#980404")
+        return
+
+    powerPerChargeEntry.delete(0, "end")
+    powerPerChargeEntry.insert(0, str(powerPerCharge))
+    statusMessage.set("Calibrated ! Power per charge = " + str(powerPerCharge))
+    status.configure(text_color="#50bc54")
+
 def controlButton(*args):
     """
     Control if all the entries are filled and enable the button if it's the case
@@ -82,6 +125,7 @@ def getAngles():
             int(lenghtEntry.get()),
             dimension=DIMENSION_CHOICES[dimensionEntry.get()],
             projectile=PROJECTILE_CHOICES[projectileEntry.get()],
+            powerPerCharge=float(powerPerChargeEntry.get() or 2),
         )
 
     except OutOfRangeException as e:
@@ -126,7 +170,8 @@ def main():
     varYaw, varPitch, varAirtime, varAirtimeSeconds, varFuzeTime,\
     varYaw2, varPitch2, varAirtime2, varAirtimeSeconds2, varFuzeTime2,\
     labelPitch, labelPitch2, varPrecision, varPrecision2, labelPitch, labelPitch2, varPrecision, varPrecision2,\
-    dimensionEntry, projectileEntry
+    dimensionEntry, projectileEntry, powerPerChargeEntry,\
+    xLanding, yLanding, zLanding, testPitchEntry 
 
     titre = ctk.CTkLabel(master=root, text="Ballistic Calculator", font=("Roboto", 60), fg_color="#1E538D", corner_radius=20)
 
@@ -178,6 +223,20 @@ def main():
     projectileLabel = ctk.CTkLabel(master=options, text="Projectile", font=("Roboto", 16))
     projectileEntry = ctk.StringVar(value="Shell / Shot")
     projectileComboBox = ctk.CTkComboBox(master=options, values=list(PROJECTILE_CHOICES.keys()), variable=projectileEntry, state="readonly")
+
+    isdecimal = root.register(floatCallback)
+
+    powerPerChargeLabel = ctk.CTkLabel(master=options, text="Power per charge (2 = normal CBC)", font=("Roboto", 16))
+    powerPerChargeEntry = ctk.CTkEntry(master=options, validate="key", validatecommand=(isdecimal, '%P'))
+    powerPerChargeEntry.insert(0, "2")
+
+    calibrationFrame = ctk.CTkFrame(master=frame)
+    calibrationLabel = ctk.CTkLabel(master=calibrationFrame, text="Calibrate from a test shot - landing spot (X;Y;Z) and pitch fired at", font=("Roboto", 16))
+    xLanding = ctk.CTkEntry(master=calibrationFrame, placeholder_text="X", validate="key", validatecommand=(isinteger, '%P'))
+    yLanding = ctk.CTkEntry(master=calibrationFrame, placeholder_text="Y", validate="key", validatecommand=(isinteger, '%P'))
+    zLanding = ctk.CTkEntry(master=calibrationFrame, placeholder_text="Z", validate="key", validatecommand=(isinteger, '%P'))
+    testPitchEntry = ctk.CTkEntry(master=calibrationFrame, placeholder_text="Pitch", validate="key", validatecommand=(isdecimal, '%P'))
+    calibrateButton = ctk.CTkButton(master=calibrationFrame, text="Calibrate", command=calibrate)
 
     varYaw = ctk.StringVar(value = "Yaw is unknown")
     varPitch = ctk.StringVar(value = "Pitch is unknown")
@@ -256,6 +315,17 @@ def main():
 
     projectileLabel.grid(column=0, row=4, pady=12, padx=10)
     projectileComboBox.grid(column=1, row=4, pady=12, padx=10)
+
+    powerPerChargeLabel.grid(column=0, row=5, pady=12, padx=10)
+    powerPerChargeEntry.grid(column=1, row=5, pady=12, padx=10)
+
+    calibrationFrame.grid(column=0, row=3, pady=12, padx=20, columnspan=4, sticky="NSEW")
+    calibrationLabel.grid(column=0, row=0, pady=12, padx=10)
+    xLanding.grid(column=1, row=0, pady=12, padx=6)
+    yLanding.grid(column=2, row=0, pady=12, padx=6)
+    zLanding.grid(column=3, row=0, pady=12, padx=6)
+    testPitchEntry.grid(column=4, row=0, pady=12, padx=6)
+    calibrateButton.grid(column=5, row=0, pady=12, padx=10)
 
     button.grid(column=0, row=5, pady=12, padx=10, columnspan=4)
 
